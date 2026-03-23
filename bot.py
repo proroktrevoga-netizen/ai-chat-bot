@@ -1,109 +1,87 @@
 import asyncio
 import logging
 import time
-from collections import defaultdict, deque
-from typing import Deque
+from collections import defaultdict
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 from openai import AsyncOpenAI
 
-import config
+from config import BOT_TOKEN, MAX_HISTORY, OPENAI_API_KEY, SYSTEM_PROMPT
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- State ---
+router = Router()
+client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# history[user_id] = deque of {"role": ..., "content": ...}
-history: dict[int, Deque[dict]] = defaultdict(lambda: deque(maxlen=config.MAX_HISTORY * 2))
-
-# last_request[user_id] = timestamp
-last_request: dict[int, float] = {}
-
-# --- Clients ---
-
-bot = Bot(token=config.BOT_TOKEN)
-dp = Dispatcher()
-openai_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+user_histories: dict[int, list[dict]] = defaultdict(list)
+user_last_request: dict[int, float] = {}
+RATE_LIMIT_SEC = 3
 
 
-# --- Helpers ---
-
-def is_rate_limited(user_id: int) -> float:
-    """Returns remaining wait seconds, or 0 if allowed."""
-    last = last_request.get(user_id, 0)
-    elapsed = time.monotonic() - last
-    remaining = config.RATE_LIMIT_SECONDS - elapsed
-    return max(0.0, remaining)
+def get_history(user_id: int) -> list[dict]:
+    return user_histories[user_id][-MAX_HISTORY * 2:]
 
 
-def build_messages(user_id: int) -> list[dict]:
-    msgs = [{"role": "system", "content": config.SYSTEM_PROMPT}]
-    msgs.extend(history[user_id])
-    return msgs
-
-
-# --- Handlers ---
-
-@dp.message(Command("start"))
-async def cmd_start(message: Message) -> None:
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    user_histories[message.from_user.id].clear()
     await message.answer(
-        "👋 Hi! I'm an AI assistant powered by OpenAI.\n\n"
-        "Just send me a message and I'll reply.\n\n"
-        "Commands:\n"
-        "/clear — reset conversation history\n"
-        "/system — show current system prompt"
+        "Привет! Я AI-ассистент. Напиши мне что-нибудь.\n"
+        "/clear — очистить историю\n"
+        "/system — текущий системный промпт"
     )
 
 
-@dp.message(Command("clear"))
-async def cmd_clear(message: Message) -> None:
-    user_id = message.from_user.id
-    history[user_id].clear()
-    await message.answer("🗑 History cleared. Starting fresh!")
+@router.message(Command("clear"))
+async def cmd_clear(message: Message):
+    user_histories[message.from_user.id].clear()
+    await message.answer("История очищена.")
 
 
-@dp.message(Command("system"))
-async def cmd_system(message: Message) -> None:
-    await message.answer(f"<b>System prompt:</b>\n<code>{config.SYSTEM_PROMPT}</code>", parse_mode="HTML")
+@router.message(Command("system"))
+async def cmd_system(message: Message):
+    await message.answer(f"Системный промпт:\n\n{SYSTEM_PROMPT}")
 
 
-@dp.message(F.text)
-async def handle_message(message: Message) -> None:
-    user_id = message.from_user.id
-
-    wait = is_rate_limited(user_id)
-    if wait > 0:
-        await message.answer(f"⏳ Please wait {wait:.1f}s before sending another message.")
+@router.message()
+async def handle_message(message: Message):
+    if not message.text:
         return
 
-    last_request[user_id] = time.monotonic()
+    user_id = message.from_user.id
+    now = time.time()
 
-    user_text = message.text.strip()
-    history[user_id].append({"role": "user", "content": user_text})
+    if now - user_last_request.get(user_id, 0) < RATE_LIMIT_SEC:
+        await message.answer("Подожди немного перед следующим запросом.")
+        return
 
-    thinking = await message.answer("...")
+    user_last_request[user_id] = now
+    user_histories[user_id].append({"role": "user", "content": message.text})
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + get_history(user_id)
 
     try:
-        response = await openai_client.chat.completions.create(
-            model=config.OPENAI_MODEL,
-            messages=build_messages(user_id),
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=1000,
         )
         reply = response.choices[0].message.content
-        history[user_id].append({"role": "assistant", "content": reply})
-        await thinking.edit_text(reply)
+        user_histories[user_id].append({"role": "assistant", "content": reply})
+        await message.answer(reply)
     except Exception as e:
-        logger.error("OpenAI error for user %d: %s", user_id, e)
-        history[user_id].pop()  # remove the unanswered user message
-        await thinking.edit_text("⚠️ Something went wrong. Please try again.")
+        logger.error(f"OpenAI error: {e}")
+        await message.answer("Произошла ошибка. Попробуй позже.")
 
 
-# --- Entry point ---
-
-async def main() -> None:
-    logger.info("Starting bot (model=%s, max_history=%d)", config.OPENAI_MODEL, config.MAX_HISTORY)
+async def main():
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher()
+    dp.include_router(router)
+    logger.info("AI Chat Bot started")
     await dp.start_polling(bot)
 
 

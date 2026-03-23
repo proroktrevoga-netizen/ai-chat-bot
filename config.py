@@ -3,14 +3,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN: str = os.environ["BOT_TOKEN"]
-OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "Ты полезный AI-ассистент. Отвечай кратко и по делу.")
+MAX_HISTORY = int(os.getenv("MAX_HISTORY", "10"))
 
-SYSTEM_PROMPT: str = os.getenv(
-    "SYSTEM_PROMPT",
-    "You are a helpful assistant. Answer clearly and concisely.",
-)
-
-MAX_HISTORY: int = int(os.getenv("MAX_HISTORY", "10"))
-OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-RATE_LIMIT_SECONDS: float = float(os.getenv("RATE_LIMIT_SECONDS", "3"))
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN is not set")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY is not set")
